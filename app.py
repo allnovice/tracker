@@ -75,3 +75,16 @@ def logout():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
+@app.route("/log", methods=["GET", "POST"])
+def log():
+    if "user" not in session:
+        return redirect("/login")
+    
+    message = ""
+    if request.method == "POST":
+        prompt = request.form.get("prompt")
+        if prompt:
+            message = log_entry(session["user"], prompt)
+    
+    return render_template("log.html", message=message)
