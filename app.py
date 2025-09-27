@@ -1,5 +1,5 @@
 # app.py
-from flask import Flask, render_template, request, redirect, url_for, session
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify
 import psycopg2, os
 from logs import log_entry
 from psycopg2.errors import UniqueViolation
@@ -131,3 +131,39 @@ def log():
         categories=categories,
         username=session["user"]
     )
+
+@app.route("/logs_data")
+def logs_data():
+    if "user" not in session:
+        return jsonify([])
+
+    selected_categories = request.args.getlist("category")
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if selected_categories and "" not in selected_categories:  # if not "All"
+        cur.execute("""
+            SELECT keyword, category, timestamp
+            FROM logs
+            WHERE username=%s AND category = ANY(%s)
+            ORDER BY timestamp DESC
+            LIMIT 10
+        """, (session["user"], selected_categories))
+    else:
+        cur.execute("""
+            SELECT keyword, category, timestamp
+            FROM logs
+            WHERE username=%s
+            ORDER BY timestamp DESC
+            LIMIT 10
+        """, (session["user"],))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    logs = [
+        {"keyword": r[0], "category": r[1], "timestamp": r[2].strftime("%Y-%m-%d %H:%M")}
+        for r in rows
+    ]
+    return jsonify(logs)
