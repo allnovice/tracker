@@ -1,39 +1,41 @@
 # filename: tracker.py
 import streamlit as st
-import sqlite3
-from datetime import datetime
 import pandas as pd
+import psycopg2
+from datetime import datetime
 
-DB_FILE = "logs.db"
+# --- Neon DB connection ---
+def get_conn():
+    return psycopg2.connect(st.secrets["NEON_CONN"])
 
-# --- Initialize DB ---
+# --- Initialize tables ---
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     c = conn.cursor()
     # Users table
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL
         )
     ''')
-    # Keyword mapping table
+    # Keyword mapping
     c.execute('''
         CREATE TABLE IF NOT EXISTS keyword_mapping (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
+            id SERIAL PRIMARY KEY,
             keyword TEXT UNIQUE NOT NULL,
             category TEXT NOT NULL
         )
     ''')
-    # Logs table
+    # Logs
     c.execute('''
         CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
+            id SERIAL PRIMARY KEY,
+            user_id INT REFERENCES users(id),
             keyword TEXT NOT NULL,
             category TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
@@ -41,39 +43,40 @@ def init_db():
 
 init_db()
 
-# --- User login ---
-def login(username, password):
-    conn = sqlite3.connect(DB_FILE)
+# --- Functions ---
+def check_login(username, password):
+    conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
-    result = c.fetchone()
+    c.execute("SELECT id FROM users WHERE username=%s AND password=%s", (username, password))
+    row = c.fetchone()
     conn.close()
-    return result is not None
+    if row:
+        return row[0]
+    return None
 
-def signup(username, password):
-    conn = sqlite3.connect(DB_FILE)
+def create_user(username, password):
+    conn = get_conn()
     c = conn.cursor()
     try:
-        c.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+        c.execute("INSERT INTO users (username, password) VALUES (%s, %s) RETURNING id", (username, password))
+        user_id = c.fetchone()[0]
         conn.commit()
-        return True
-    except sqlite3.IntegrityError:
-        return False
+        return user_id
+    except:
+        conn.rollback()
+        return None
     finally:
         conn.close()
 
-# --- Log entry ---
-def log_entry(username, prompt):
-    conn = sqlite3.connect(DB_FILE)
+def log_entry(user_id, prompt):
+    conn = get_conn()
     c = conn.cursor()
-
     if "=" in prompt:
         keyword, category = [x.strip().lower() for x in prompt.split("=", 1)]
-        c.execute("INSERT OR REPLACE INTO keyword_mapping (username, keyword, category) VALUES (?, ?, ?)",
-                  (username, keyword, category))
+        c.execute("INSERT INTO keyword_mapping (keyword, category) VALUES (%s, %s) ON CONFLICT (keyword) DO UPDATE SET category=EXCLUDED.category", (keyword, category))
     else:
         keyword = prompt.strip().lower()
-        c.execute("SELECT category FROM keyword_mapping WHERE username=? AND keyword=?", (username, keyword))
+        c.execute("SELECT category FROM keyword_mapping WHERE keyword=%s", (keyword,))
         row = c.fetchone()
         if row:
             category = row[0]
@@ -81,8 +84,8 @@ def log_entry(username, prompt):
             category = None
 
     if category:
-        c.execute("INSERT INTO logs (username, keyword, category, timestamp) VALUES (?, ?, ?, ?)",
-                  (username, keyword, category, datetime.now()))
+        c.execute("INSERT INTO logs (user_id, keyword, category, timestamp) VALUES (%s, %s, %s, %s)", 
+                  (user_id, keyword, category, datetime.now()))
         conn.commit()
         conn.close()
         return f"✅ Logged '{keyword}' under '{category}'"
@@ -90,65 +93,64 @@ def log_entry(username, prompt):
         conn.close()
         return f"⚠️ Category unknown for '{keyword}'. Define it using 'keyword = category'."
 
-# --- Streamlit App ---
+# --- Streamlit UI ---
 st.set_page_config(page_title="📊 Daily Activity Tracker", layout="wide")
 st.title("📊 Daily Activity Tracker")
 
-# Session state for login
-if "user" not in st.session_state:
-    st.session_state.user = None
+# --- Session login ---
+if "user_id" not in st.session_state:
+    st.session_state.user_id = None
+if "username" not in st.session_state:
+    st.session_state.username = None
 
-# --- Sidebar: Login / Signup ---
-with st.sidebar:
-    if st.session_state.user is None:
-        st.subheader("Login")
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        login_btn = st.button("Login")
-        signup_btn = st.button("Sign Up")
+login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
 
-        if login_btn and username and password:
-            if login(username, password):
-                st.session_state.user = username
-                st.success(f"Logged in as {username}")
-            else:
-                st.error("Invalid username or password")
+with login_tab:
+    st.subheader("Login")
+    login_user = st.text_input("Username")
+    login_pass = st.text_input("Password", type="password")
+    if st.button("Login"):
+        user_id = check_login(login_user, login_pass)
+        if user_id:
+            st.session_state.user_id = user_id
+            st.session_state.username = login_user
+            st.success(f"Logged in as {login_user}")
+        else:
+            st.error("Invalid username/password")
 
-        if signup_btn and username and password:
-            if signup(username, password):
-                st.success("Account created! You can now log in.")
-            else:
-                st.error("Username already exists")
-    else:
-        st.info(f"Logged in as {st.session_state.user}")
-        if st.button("Logout"):
-            st.session_state.user = None
+with signup_tab:
+    st.subheader("Sign Up")
+    new_user = st.text_input("New Username", key="new_user")
+    new_pass = st.text_input("New Password", type="password", key="new_pass")
+    if st.button("Create Account"):
+        user_id = create_user(new_user, new_pass)
+        if user_id:
+            st.success(f"Account created. You can now login as {new_user}.")
+        else:
+            st.error("Username taken or error.")
 
-# --- Main app: only if logged in ---
-if st.session_state.user:
-    current_user = st.session_state.user
-
-    # Input
-    prompt = st.text_input("Enter a keyword (or 'keyword = category'):")
-    if st.button("Submit") and prompt:
-        result = log_entry(current_user, prompt)
-        st.success(result)
-
+# --- Only show app if logged in ---
+if st.session_state.user_id:
+    st.sidebar.header(f"Welcome, {st.session_state.username}!")
     # Sidebar filter
-    st.sidebar.subheader("Filters")
-    conn = sqlite3.connect(DB_FILE)
-    categories = [row[0] for row in conn.execute("SELECT DISTINCT category FROM logs WHERE username=?", (current_user,)).fetchall()]
+    conn = get_conn()
+    categories = [row[0] for row in pd.read_sql("SELECT DISTINCT category FROM logs WHERE user_id=%s", conn, params=(st.session_state.user_id,)).values.tolist()]
     conn.close()
     selected_category = st.sidebar.selectbox("Filter by category:", ["All"] + categories)
 
+    # Input
+    prompt = st.text_input("Enter a keyword (or 'keyword = category'):")
+
+    if st.button("Submit") and prompt:
+        result = log_entry(st.session_state.user_id, prompt)
+        st.success(result)
+
     # Display logs
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_conn()
     if selected_category == "All":
-        logs_df = pd.read_sql("SELECT keyword, category, timestamp FROM logs WHERE username=? ORDER BY timestamp DESC LIMIT 50",
-                              conn, params=(current_user,))
+        logs_df = pd.read_sql("SELECT keyword, category, timestamp FROM logs WHERE user_id=%s ORDER BY timestamp DESC LIMIT 50", conn, params=(st.session_state.user_id,))
     else:
-        logs_df = pd.read_sql("SELECT keyword, category, timestamp FROM logs WHERE username=? AND category=? ORDER BY timestamp DESC LIMIT 50",
-                              conn, params=(current_user, selected_category))
+        logs_df = pd.read_sql("SELECT keyword, category, timestamp FROM logs WHERE user_id=%s AND category=%s ORDER BY timestamp DESC LIMIT 50", conn, params=(st.session_state.user_id, selected_category))
     conn.close()
 
     if not logs_df.empty:
@@ -157,9 +159,9 @@ if st.session_state.user:
     else:
         st.info("No logs yet.")
 
-    # Optional: show category mapping
-    conn = sqlite3.connect(DB_FILE)
-    mapping_df = pd.read_sql("SELECT keyword, category FROM keyword_mapping WHERE username=? ORDER BY keyword", conn, params=(current_user,))
+    # Show keyword mapping
+    conn = get_conn()
+    mapping_df = pd.read_sql("SELECT keyword, category FROM keyword_mapping ORDER BY keyword", conn)
     conn.close()
     if not mapping_df.empty:
         st.subheader("📚 Keyword Mappings")
