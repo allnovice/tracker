@@ -1,12 +1,16 @@
 from flask import Blueprint, render_template, request, redirect, session
 from datetime import datetime
 import psycopg2
+import os
 
 logs_bp = Blueprint('logs', __name__)
 
 def get_conn():
-    # Return a Neon connection
-    return psycopg2.connect(<your_neon_url_here>)
+    # Read Neon DB URL from environment variable
+    neon_url = os.environ.get("NEON")  # make sure your secret is named 'NEON'
+    if not neon_url:
+        raise ValueError("NEON environment variable not set")
+    return psycopg2.connect(neon_url)
 
 @logs_bp.route("/log", methods=["GET", "POST"])
 def log():
