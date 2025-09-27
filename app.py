@@ -2,7 +2,10 @@
 from flask import Flask, render_template, request, redirect, url_for, session
 import psycopg2
 import os
+from logs import logs_bp
 
+
+app.register_blueprint(logs_bp)
 app = Flask(__name__)
 app.secret_key = "supersecretkey"  # required for sessions
 
