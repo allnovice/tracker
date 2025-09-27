@@ -1,55 +1,79 @@
 # logs.py
-from flask import Blueprint, render_template, request, session
-import psycopg2, os
+import psycopg2
 from datetime import datetime
+import os
 
-logs_bp = Blueprint("logs", __name__, template_folder="templates")
-
+# Connect to Neon DB
 def get_conn():
     db_url = os.environ.get("NEON")
     return psycopg2.connect(db_url)
 
-# Helper function for logging
-def log_entry(user, prompt):
+# Initialize tables
+def init_tables():
     conn = get_conn()
-    c = conn.cursor()
+    cur = conn.cursor()
+    
+    # Table for keyword -> category mapping
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS keyword_mapping (
+            id SERIAL PRIMARY KEY,
+            username TEXT NOT NULL,
+            keyword TEXT NOT NULL,
+            category TEXT NOT NULL,
+            UNIQUE(username, keyword)
+        )
+    """)
+    
+    # Table for logs
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id SERIAL PRIMARY KEY,
+            username TEXT NOT NULL,
+            keyword TEXT NOT NULL,
+            category TEXT NOT NULL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
 
+init_tables()
+
+# Log entry function
+def log_entry(username, prompt):
+    conn = get_conn()
+    cur = conn.cursor()
+    message = ""
+
+    # If user defines category explicitly
     if "=" in prompt:
         keyword, category = [x.strip().lower() for x in prompt.split("=", 1)]
-        c.execute("""
+        # Insert or update mapping
+        cur.execute("""
             INSERT INTO keyword_mapping (username, keyword, category)
             VALUES (%s, %s, %s)
-            ON CONFLICT (username, keyword) DO UPDATE
-            SET category=EXCLUDED.category
-        """, (user, keyword, category))
+            ON CONFLICT (username, keyword) DO UPDATE SET category = EXCLUDED.category
+        """, (username, keyword, category))
     else:
         keyword = prompt.strip().lower()
-        c.execute("SELECT category FROM keyword_mapping WHERE username=%s AND keyword=%s", (user, keyword))
-        row = c.fetchone()
+        # Look up category
+        cur.execute("""
+            SELECT category FROM keyword_mapping
+            WHERE username = %s AND keyword = %s
+        """, (username, keyword))
+        row = cur.fetchone()
         category = row[0] if row else None
 
     if category:
-        c.execute("""
+        cur.execute("""
             INSERT INTO logs (username, keyword, category, timestamp)
             VALUES (%s, %s, %s, %s)
-        """, (user, keyword, category, datetime.now()))
-        conn.commit()
-        conn.close()
-        return f"✅ Logged '{keyword}' under '{category}'"
+        """, (username, keyword, category, datetime.now()))
+        message = f"✅ Logged '{keyword}' under '{category}'"
     else:
-        conn.close()
-        return f"⚠️ Category unknown for '{keyword}'. Define it using 'keyword = category'."
+        message = f"⚠️ Category unknown for '{keyword}'. Define it using 'keyword = category'."
 
-# Flask route
-@logs_bp.route("/log", methods=["GET", "POST"])
-def log_route():
-    if "user" not in session:
-        return redirect("/login")
-    
-    message = ""
-    if request.method == "POST":
-        prompt = request.form.get("prompt")
-        if prompt:
-            message = log_entry(session["user"], prompt)
-    
-    return render_template("log.html", message=message)
+    conn.commit()
+    conn.close()
+    return message
