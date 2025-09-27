@@ -93,7 +93,7 @@ def log_entry(username, prompt):
         return f"⚠️ Category unknown for '{keyword}'. Define it using 'keyword = category'."
 
 # --- Persistent Login via query params ---
-params = st.experimental_get_query_params()
+params = st.query_params
 if "user" in params:
     st.session_state.user = params["user"][0]
 
