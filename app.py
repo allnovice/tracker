@@ -85,7 +85,6 @@ def logout():
     session.pop("user", None)
     return redirect(url_for("login"))
     
-# Log route
 @app.route("/log", methods=["GET", "POST"])
 def log():
     if "user" not in session:
@@ -93,6 +92,7 @@ def log():
 
     message = ""
     logs = []
+    categories = []
 
     conn = get_conn()
     cur = conn.cursor()
@@ -111,10 +111,23 @@ def log():
         ORDER BY timestamp DESC
         LIMIT 10
     """, (session["user"],))
-    logs = cur.fetchall()  # list of tuples
+    logs = cur.fetchall()
+
+    # Fetch distinct categories for sidebar filter
+    cur.execute("""
+        SELECT DISTINCT category FROM logs WHERE username = %s
+    """, (session["user"],))
+    categories = [row[0] for row in cur.fetchall()]
+
     conn.close()
 
-    # Convert to list of dicts for template
+    # Convert to dicts for template
     logs_dict = [{"keyword": row[0], "category": row[1], "timestamp": row[2]} for row in logs]
 
-    return render_template("log.html", message=message, logs=logs_dict)
+    return render_template(
+        "log.html",
+        message=message,
+        logs=logs_dict,
+        categories=categories,
+        username=session["user"]
+    )
