@@ -38,6 +38,9 @@ def home():
 # Login
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    if "user" in session:
+        return redirect(url_for("log"))  # already logged in
+    
     if request.method == "POST":
         username = request.form["username"]
         password = request.form["password"]
@@ -52,9 +55,13 @@ def login():
         return render_template("login.html", error="Invalid credentials")
     return render_template("login.html")
 
+
 # Signup
 @app.route("/signup", methods=["GET", "POST"])
 def signup():
+    if "user" in session:
+        return redirect(url_for("log"))  # already logged in
+
     if request.method == "POST":
         username = request.form["username"]
         password = request.form["password"]
