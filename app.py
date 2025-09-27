@@ -1,38 +1,28 @@
-# filename: app.py
+# filename: tracker_app.py
 import streamlit as st
 import psycopg2
 import pandas as pd
 from datetime import datetime
 
-# --- Streamlit Page Config ---
-st.set_page_config(page_title="📊 Daily Activity Tracker", layout="wide")
-
-# --- Neon DB Connection ---
+# --- DB Connection ---
 def get_conn():
     conn_str = st.secrets["NEON_CONN"]
     return psycopg2.connect(conn_str)
 
-# --- Initialize DB ---
+# --- Initialize DB (first run only) ---
 def init_db():
     conn = get_conn()
     c = conn.cursor()
     # Users table
-    c.execute('''
+    c.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL
         )
-    ''')
-    # Keyword mapping table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS keyword_mapping (
-            id SERIAL PRIMARY KEY,
-            keyword TEXT UNIQUE NOT NULL,
-            category TEXT NOT NULL
-        )
-    ''')
-    # Logs table (add username column if missing)
-    c.execute('''
+    """)
+    # Logs table with username
+    c.execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id SERIAL PRIMARY KEY,
             username TEXT NOT NULL,
@@ -40,37 +30,52 @@ def init_db():
             category TEXT NOT NULL,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    ''')
+    """)
+    # Keyword mapping table
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS keyword_mapping (
+            id SERIAL PRIMARY KEY,
+            keyword TEXT UNIQUE NOT NULL,
+            category TEXT NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- Functions ---
-def signup(username, password):
-    conn = get_conn()
-    c = conn.cursor()
+# --- Authentication ---
+def signup(user, pwd):
     try:
-        c.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (username, password))
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (user, pwd))
         conn.commit()
-        return True, "Signup successful!"
+        conn.close()
+        st.session_state.user = user
+        return True
     except psycopg2.errors.UniqueViolation:
         conn.rollback()
-        return False, "Username already exists."
-    finally:
         conn.close()
+        return False
 
-def login(username, password):
+def login(user, pwd):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT password FROM users WHERE username=%s", (username,))
+    c.execute("SELECT * FROM users WHERE username=%s AND password=%s", (user, pwd))
     row = c.fetchone()
     conn.close()
-    if row and row[0] == password:
+    if row:
+        st.session_state.user = user
         return True
     return False
 
-def log_entry(username, prompt):
+def logout():
+    if "user" in st.session_state:
+        del st.session_state.user
+
+# --- Logging Function ---
+def log_entry(user, prompt):
     conn = get_conn()
     c = conn.cursor()
     if "=" in prompt:
@@ -80,11 +85,13 @@ def log_entry(username, prompt):
         keyword = prompt.strip().lower()
         c.execute("SELECT category FROM keyword_mapping WHERE keyword=%s", (keyword,))
         row = c.fetchone()
-        category = row[0] if row else None
-
+        if row:
+            category = row[0]
+        else:
+            category = None
     if category:
         c.execute("INSERT INTO logs (username, keyword, category, timestamp) VALUES (%s, %s, %s, %s)",
-                  (username, keyword, category, datetime.now()))
+                  (user, keyword, category, datetime.now()))
         conn.commit()
         conn.close()
         return f"✅ Logged '{keyword}' under '{category}'"
@@ -92,52 +99,45 @@ def log_entry(username, prompt):
         conn.close()
         return f"⚠️ Category unknown for '{keyword}'. Define it using 'keyword = category'."
 
-# --- Persistent Login via query params ---
-params = st.query_params
-if "user" in params:
-    st.session_state.user = params["user"][0]
+# --- Streamlit UI ---
+st.set_page_config(page_title="📊 Daily Activity Tracker", layout="wide")
+
+if "user" not in st.session_state:
+    st.session_state.user = None
 
 # --- Login / Signup ---
-if "user" not in st.session_state:
-    st.title("🔐 Login / Signup")
-    tab1, tab2 = st.tabs(["Login", "Signup"])
+if st.session_state.user is None:
+    st.title("🔑 Login / Signup")
+    col1, col2 = st.columns(2)
 
-    with tab1:
+    with col1:
+        st.subheader("Login")
         login_user = st.text_input("Username", key="login_user")
         login_pass = st.text_input("Password", type="password", key="login_pass")
         if st.button("Login"):
             if login(login_user, login_pass):
-                st.session_state.user = login_user
-                st.experimental_set_query_params(user=login_user)
+                st.success(f"Logged in as {login_user}")
                 st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
 
-    with tab2:
-        signup_user = st.text_input("Username", key="signup_user")
-        signup_pass = st.text_input("Password", type="password", key="signup_pass")
+    with col2:
+        st.subheader("Signup")
+        signup_user = st.text_input("New Username", key="signup_user")
+        signup_pass = st.text_input("New Password", type="password", key="signup_pass")
         if st.button("Signup"):
-            success, msg = signup(signup_user, signup_pass)
-            if success:
-                # Auto login after signup
-                st.session_state.user = signup_user
-                st.experimental_set_query_params(user=signup_user)
+            if signup(signup_user, signup_pass):
+                st.success(f"Account created. Logged in as {signup_user}")
                 st.experimental_rerun()
             else:
-                st.error(msg)
+                st.error("Username already exists")
 else:
-    # --- Main App ---
     st.title(f"📊 Daily Activity Tracker - {st.session_state.user}")
+    if st.button("Logout"):
+        logout()
+        st.experimental_rerun()
 
-    # Logout button
-    col1, col2 = st.columns([0.9, 0.1])
-    with col2:
-        if st.button("Logout"):
-            del st.session_state.user
-            st.experimental_set_query_params()
-            st.experimental_rerun()
-
-    # Sidebar filter
+    # --- Sidebar Filters ---
     st.sidebar.header("Filters")
     conn = get_conn()
     c = conn.cursor()
@@ -146,13 +146,13 @@ else:
     conn.close()
     selected_category = st.sidebar.selectbox("Filter by category:", ["All"] + categories)
 
-    # Input
+    # --- Input ---
     prompt = st.text_input("Enter a keyword (or 'keyword = category'):")
     if st.button("Submit") and prompt:
         result = log_entry(st.session_state.user, prompt)
         st.success(result)
 
-    # Display logs
+    # --- Display Logs ---
     conn = get_conn()
     if selected_category == "All":
         logs_df = pd.read_sql("SELECT keyword, category, timestamp FROM logs WHERE username=%s ORDER BY timestamp DESC LIMIT 50", conn, params=(st.session_state.user,))
@@ -166,7 +166,7 @@ else:
     else:
         st.info("No logs yet.")
 
-    # Optional: show category mapping
+    # --- Keyword Mapping ---
     conn = get_conn()
     mapping_df = pd.read_sql("SELECT keyword, category FROM keyword_mapping ORDER BY keyword", conn)
     conn.close()
