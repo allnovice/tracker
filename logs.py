@@ -1,19 +1,16 @@
-# logs.py
 import psycopg2
 from datetime import datetime
 import os
 
-# Connect to Neon DB
 def get_conn():
     db_url = os.environ.get("NEON")
     return psycopg2.connect(db_url)
 
-# Initialize tables
+# Lazy table creation
 def init_tables():
     conn = get_conn()
     cur = conn.cursor()
-    
-    # Table for keyword -> category mapping
+    # keyword -> category mapping
     cur.execute("""
         CREATE TABLE IF NOT EXISTS keyword_mapping (
             id SERIAL PRIMARY KEY,
@@ -23,8 +20,7 @@ def init_tables():
             UNIQUE(username, keyword)
         )
     """)
-    
-    # Table for logs
+    # logs table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id SERIAL PRIMARY KEY,
@@ -34,30 +30,26 @@ def init_tables():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    
     conn.commit()
     conn.close()
 
-init_tables()
-
-# Log entry function
 def log_entry(username, prompt):
+    init_tables()  # ensure tables exist
+
     conn = get_conn()
     cur = conn.cursor()
     message = ""
 
-    # If user defines category explicitly
-    if "=" in prompt:
+    if "=" in prompt:  # user defines category explicitly
         keyword, category = [x.strip().lower() for x in prompt.split("=", 1)]
-        # Insert or update mapping
         cur.execute("""
             INSERT INTO keyword_mapping (username, keyword, category)
             VALUES (%s, %s, %s)
-            ON CONFLICT (username, keyword) DO UPDATE SET category = EXCLUDED.category
+            ON CONFLICT (username, keyword)
+            DO UPDATE SET category = EXCLUDED.category
         """, (username, keyword, category))
     else:
         keyword = prompt.strip().lower()
-        # Look up category
         cur.execute("""
             SELECT category FROM keyword_mapping
             WHERE username = %s AND keyword = %s
