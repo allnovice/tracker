@@ -1,18 +1,18 @@
 # app.py
 from flask import Flask, render_template, request, redirect, url_for, session
 import psycopg2, os
-from logs import logs_bp, log_entry  # import blueprint and helper
+from logs import log_entry
+from psycopg2.errors import UniqueViolation
 
 app = Flask(__name__)
-app.secret_key = "supersecretkey"
-app.register_blueprint(logs_bp)
+app.secret_key = "supersecretkey"  # sessions
 
 # Connect to Neon DB
 def get_conn():
     db_url = os.environ.get("NEON")
     return psycopg2.connect(db_url)
 
-# Initialize tables (users)
+# Initialize users table
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
@@ -28,11 +28,11 @@ def init_db():
 
 init_db()
 
-# Home
+# Home redirects to logs if logged in
 @app.route("/")
 def home():
     if "user" in session:
-        return f"<h1>Welcome, {session['user']}!</h1><a href='/logout'>Logout</a>"
+        return redirect(url_for("log"))
     return redirect(url_for("login"))
 
 # Login
@@ -48,9 +48,8 @@ def login():
         conn.close()
         if user:
             session["user"] = username
-            return redirect(url_for("home"))
-        else:
-            return render_template("login.html", error="Invalid credentials")
+            return redirect(url_for("log"))
+        return render_template("login.html", error="Invalid credentials")
     return render_template("login.html")
 
 # Signup
@@ -64,13 +63,13 @@ def signup():
         try:
             cur.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (username, password))
             conn.commit()
-        except psycopg2.errors.UniqueViolation:
+        except UniqueViolation:
             conn.rollback()
             return render_template("signup.html", error="Username already exists")
         finally:
             conn.close()
         session["user"] = username
-        return redirect(url_for("home"))
+        return redirect(url_for("log"))
     return render_template("signup.html")
 
 # Logout
@@ -79,32 +78,20 @@ def logout():
     session.pop("user", None)
     return redirect(url_for("login"))
 
-# Log route (must be before app.run)
+# Log route
 @app.route("/log", methods=["GET", "POST"])
 def log():
     if "user" not in session:
-        return redirect("/login")
-    
+        return redirect(url_for("login"))
+
     message = ""
     if request.method == "POST":
         prompt = request.form.get("prompt")
         if prompt:
             message = log_entry(session["user"], prompt)
-    
+
     return render_template("log.html", message=message)
+    
 
 if __name__ == "__main__":
     app.run(debug=True)
-
-@app.route("/log", methods=["GET", "POST"])
-def log_route():
-    if "user" not in session:
-        return redirect("/login")
-    
-    message = ""
-    if request.method == "POST":
-        prompt = request.form.get("prompt")
-        if prompt:
-            message = log_entry(session["user"], prompt)
-    
-    return render_template("log.html", message=message)
