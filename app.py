@@ -1,14 +1,16 @@
-# filename: tracker.py
+# filename: tracker_neon.py
 import streamlit as st
 import pandas as pd
 import psycopg2
 from datetime import datetime
 
-# --- Neon DB connection ---
-def get_conn():
-    return psycopg2.connect(st.secrets["NEON_CONN"])
+# --- Connect to Neon ---
+conn_str = st.secrets["NEON_CONN"]
 
-# --- Initialize tables ---
+def get_conn():
+    return psycopg2.connect(conn_str)
+
+# --- Initialize DB ---
 def init_db():
     conn = get_conn()
     c = conn.cursor()
@@ -20,7 +22,17 @@ def init_db():
             password TEXT NOT NULL
         )
     ''')
-    # Keyword mapping
+    # Logs table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS logs (
+            id SERIAL PRIMARY KEY,
+            username TEXT NOT NULL,
+            keyword TEXT NOT NULL,
+            category TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Optional keyword mapping
     c.execute('''
         CREATE TABLE IF NOT EXISTS keyword_mapping (
             id SERIAL PRIMARY KEY,
@@ -28,49 +40,41 @@ def init_db():
             category TEXT NOT NULL
         )
     ''')
-    # Logs
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS logs (
-            id SERIAL PRIMARY KEY,
-            user_id INT REFERENCES users(id),
-            keyword TEXT NOT NULL,
-            category TEXT NOT NULL,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- Functions ---
-def check_login(username, password):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT id FROM users WHERE username=%s AND password=%s", (username, password))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return row[0]
-    return None
-
-def create_user(username, password):
+# --- Helper functions ---
+def signup(username, password):
     conn = get_conn()
     c = conn.cursor()
     try:
-        c.execute("INSERT INTO users (username, password) VALUES (%s, %s) RETURNING id", (username, password))
-        user_id = c.fetchone()[0]
+        c.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (username, password))
         conn.commit()
-        return user_id
-    except:
+        st.session_state["user"] = username  # auto-login
+        return True, "Signup successful! Logged in."
+    except psycopg2.errors.UniqueViolation:
         conn.rollback()
-        return None
+        return False, "Username already exists."
     finally:
         conn.close()
 
-def log_entry(user_id, prompt):
+def login(username, password):
     conn = get_conn()
     c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username=%s AND password=%s", (username, password))
+    user = c.fetchone()
+    conn.close()
+    if user:
+        st.session_state["user"] = username
+        return True, f"Welcome back, {username}!"
+    return False, "Invalid username or password."
+
+def log_entry(username, prompt):
+    conn = get_conn()
+    c = conn.cursor()
+
     if "=" in prompt:
         keyword, category = [x.strip().lower() for x in prompt.split("=", 1)]
         c.execute("INSERT INTO keyword_mapping (keyword, category) VALUES (%s, %s) ON CONFLICT (keyword) DO UPDATE SET category=EXCLUDED.category", (keyword, category))
@@ -78,14 +82,10 @@ def log_entry(user_id, prompt):
         keyword = prompt.strip().lower()
         c.execute("SELECT category FROM keyword_mapping WHERE keyword=%s", (keyword,))
         row = c.fetchone()
-        if row:
-            category = row[0]
-        else:
-            category = None
+        category = row[0] if row else None
 
     if category:
-        c.execute("INSERT INTO logs (user_id, keyword, category, timestamp) VALUES (%s, %s, %s, %s)", 
-                  (user_id, keyword, category, datetime.now()))
+        c.execute("INSERT INTO logs (username, keyword, category) VALUES (%s, %s, %s)", (username, keyword, category))
         conn.commit()
         conn.close()
         return f"✅ Logged '{keyword}' under '{category}'"
@@ -95,62 +95,49 @@ def log_entry(user_id, prompt):
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="📊 Daily Activity Tracker", layout="wide")
-st.title("📊 Daily Activity Tracker")
 
-# --- Session login ---
-if "user_id" not in st.session_state:
-    st.session_state.user_id = None
-if "username" not in st.session_state:
-    st.session_state.username = None
+if "user" not in st.session_state:
+    st.session_state["user"] = None
 
-login_tab, signup_tab = st.tabs(["Login", "Sign Up"])
+if not st.session_state["user"]:
+    st.title("Login or Signup")
+    tab1, tab2 = st.tabs(["Login", "Signup"])
 
-with login_tab:
-    st.subheader("Login")
-    login_user = st.text_input("Username")
-    login_pass = st.text_input("Password", type="password")
-    if st.button("Login"):
-        user_id = check_login(login_user, login_pass)
-        if user_id:
-            st.session_state.user_id = user_id
-            st.session_state.username = login_user
-            st.success(f"Logged in as {login_user}")
-        else:
-            st.error("Invalid username/password")
+    with tab1:
+        l_user = st.text_input("Username", key="l_user")
+        l_pass = st.text_input("Password", type="password", key="l_pass")
+        if st.button("Login"):
+            success, msg = login(l_user, l_pass)
+            st.success(msg) if success else st.error(msg)
 
-with signup_tab:
-    st.subheader("Sign Up")
-    new_user = st.text_input("New Username", key="new_user")
-    new_pass = st.text_input("New Password", type="password", key="new_pass")
-    if st.button("Create Account"):
-        user_id = create_user(new_user, new_pass)
-        if user_id:
-            st.success(f"Account created. You can now login as {new_user}.")
-        else:
-            st.error("Username taken or error.")
+    with tab2:
+        s_user = st.text_input("Username", key="s_user")
+        s_pass = st.text_input("Password", type="password", key="s_pass")
+        if st.button("Signup"):
+            success, msg = signup(s_user, s_pass)
+            st.success(msg) if success else st.error(msg)
 
-# --- Only show app if logged in ---
-if st.session_state.user_id:
-    st.sidebar.header(f"Welcome, {st.session_state.username}!")
-    # Sidebar filter
-    conn = get_conn()
-    categories = [row[0] for row in pd.read_sql("SELECT DISTINCT category FROM logs WHERE user_id=%s", conn, params=(st.session_state.user_id,)).values.tolist()]
-    conn.close()
-    selected_category = st.sidebar.selectbox("Filter by category:", ["All"] + categories)
-
-    # Input
+else:
+    st.title(f"📊 Daily Activity Tracker - {st.session_state['user']}")
     prompt = st.text_input("Enter a keyword (or 'keyword = category'):")
 
     if st.button("Submit") and prompt:
-        result = log_entry(st.session_state.user_id, prompt)
+        result = log_entry(st.session_state["user"], prompt)
         st.success(result)
+
+    # Sidebar filter
+    st.sidebar.header("Filters")
+    conn = get_conn()
+    categories = [row[0] for row in conn.cursor().execute("SELECT DISTINCT category FROM logs WHERE username=%s", (st.session_state["user"],))]
+    conn.close()
+    selected_category = st.sidebar.selectbox("Filter by category:", ["All"] + categories)
 
     # Display logs
     conn = get_conn()
     if selected_category == "All":
-        logs_df = pd.read_sql("SELECT keyword, category, timestamp FROM logs WHERE user_id=%s ORDER BY timestamp DESC LIMIT 50", conn, params=(st.session_state.user_id,))
+        logs_df = pd.read_sql("SELECT keyword, category, timestamp FROM logs WHERE username=%s ORDER BY timestamp DESC LIMIT 50", conn, params=(st.session_state["user"],))
     else:
-        logs_df = pd.read_sql("SELECT keyword, category, timestamp FROM logs WHERE user_id=%s AND category=%s ORDER BY timestamp DESC LIMIT 50", conn, params=(st.session_state.user_id, selected_category))
+        logs_df = pd.read_sql("SELECT keyword, category, timestamp FROM logs WHERE username=%s AND category=%s ORDER BY timestamp DESC LIMIT 50", conn, params=(st.session_state["user"], selected_category))
     conn.close()
 
     if not logs_df.empty:
@@ -159,7 +146,7 @@ if st.session_state.user_id:
     else:
         st.info("No logs yet.")
 
-    # Show keyword mapping
+    # Optional: keyword mappings
     conn = get_conn()
     mapping_df = pd.read_sql("SELECT keyword, category FROM keyword_mapping ORDER BY keyword", conn)
     conn.close()
